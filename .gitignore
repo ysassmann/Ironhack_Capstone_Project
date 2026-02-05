@@ -1,0 +1,33 @@
+# Virtual environment
+ironhack/
+venv/
+env/
+
+# Scraped documents
+pdfs/
+giz/
+*.pdf
+
+# Chroma_db vector data
+chroma_db_giz/ 
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+*.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

@@ -93,7 +93,7 @@ def scrape_with_session(start_index=0):
     downloads_in_session = 0
     session_start_time = datetime.now()
     consecutive_timeouts = 0
-    MAX_CONSECUTIVE_TIMEOUTS = 5
+    MAX_CONSECUTIVE_TIMEOUTS = 15
 
     with sync_playwright() as p:
         # Create temporary directory for browser profile

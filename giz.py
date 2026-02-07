@@ -15,9 +15,12 @@ import re
 import tempfile
 import time
 import random
+import shutil
 from pathlib import Path
 
+
 from playwright.sync_api import sync_playwright # for browser automation
+from playwright.sync_api import TimeoutError
 from rich import print
 
 
@@ -47,8 +50,11 @@ pdf_dir.mkdir(parents=True, exist_ok=True) # make the folders if they don't exis
 # (5) Start playwright; this is what controls the browser
 def main():
     
-    # Some of the reports didnt download and I cant figure out why. So I wanted an overview of the faiiled downloads
-    failed_downloads = []
+    # Some of the reports didnt download and I cant figure out why. So I wanted an overview of the failed downloads
+    failed_file = Path("failed_downloads.json")
+    failed_downloads = json.load(failed_file.open("r", encoding="utf-8")) if failed_file.exists() else []
+    results_file = Path("results_giz.json")
+    results = json.load(results_file.open("r", encoding="utf-8")) if results_file.exists() else []
 
     with sync_playwright() as p:
         # Create temporary directory for browser profile
@@ -68,7 +74,7 @@ def main():
 
         # Launch persistent context with the configured user data directory
         browser_context = p.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir, headless=True, accept_downloads=True 
+            user_data_dir=user_data_dir, headless=False, accept_downloads=True
         )            # headless=True means no browser window shows up
                      # accept_downloads=True allows downloading files
 
@@ -79,7 +85,7 @@ def main():
         # Go to the GIZ publications website
         print("Navigating to website...")
         page.goto("https://publikationen.giz.de/esearcha/browse.tt.html")
-        page.wait_for_load_state("networkidle") # Need to wait, such that the page is fully loaded
+        page.wait_for_load_state("networkidle") # Wait until the page is fully loaded
 
         # Search for the document type "Evaluierungsberichte" that I am interested in
         print("Searching for Evaluierungsberichte...")
@@ -97,21 +103,11 @@ def main():
         print("Selecting 'Alles auf einer Seite'...")
         page.click("ul.multiselect-container li:has-text('Alles auf einer Seite')")
         page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(30_000)
 
         # Switch to full view instead of short view. This shows more details for each result
         page.click("button:has-text('Kurzanzeige')")
         page.click("li:has-text('Vollanzeige')")
         page.wait_for_timeout(120_000)
-
-        # Setup JSON file to save metadata from project overviews
-        results_file = Path("results_giz.json")
-        if results_file.exists():
-            with open(results_file, "r", encoding="utf-8") as f:
-                results = json.load(f)
-        else:
-            results = []
-        
 
         # Find the container with all the results
         container = page.locator("#results-container")
@@ -125,24 +121,15 @@ def main():
         current_report = 0
 
         # Loop through each result item
-        for item in all_items:
+        for item in reversed(all_items):
             current_report += 1  # increment counter for each report
             print(f"\n--- Processing report {current_report} of {total_reports} ---")
             
-            random_delay(2, 4)  # wait randomly between 1-3 seconds
-
             # Some reports didnt have links, so I needed to skip them
             if item.locator(".shortsummary-url a").count() == 0:
                 continue
             slug_element = item.locator(".shortsummary-url a").first
             slug = slug_element.get_attribute("alt").split(" ")[0]
-
-            # Skips if we already downloaded this one
-            metadata = next((r for r in results if r["slug"] == slug), None)
-            if metadata:
-                if Path(pdf_dir / metadata["filename"]).exists():
-                    print(f"Skipping {slug[:30]}... because it already exists")
-                    continue
             
             # Get all the metadata from the summary view. Had some help with claude for the generalisation of the regex patterns.
             detail_container = item.locator(".tab-pane")
@@ -157,40 +144,102 @@ def main():
             id = id.group(1) if id else "unknown"
             metadata["id"] = id
             date = normalize_date(metadata["Erscheinungsdatum"]) # Use the function we created above
-            lang = metadata["Sprache"][:2]
+            lang = metadata.get("Sprache", "xx").strip()[:2].lower()
             metadata["slug"] = slug # Learned something: Slug is a URL-friendly version of a string, typically used for creating clean, readable URLs or identifiers.
             filename = f"{date}_{id}_{lang}.pdf".lower()
             metadata["filename"] = filename
-            download_url = rows[-1].locator("a").first.get_attribute("href")
-            # Add metadata if its new
-            if metadata not in results:
-                results.append(metadata)
-            # Save results, so if the script crashes not everything will be lost
-            with results_file.open("w", encoding="utf-8") as f:
-                json.dump(results, f, indent=2, ensure_ascii=False)
 
-            print(f"Downloading ({current_report}/{total_reports}):\t{filename}")
+            # Find download link AND extract size - search in the ENTIRE item
+            download_url = None
+            remote_size_bytes = None
+            download_link_element = None
 
-            try:
-                # Add small delay before download
-                random_delay(1.5, 3)
-                # Create a new page for each download to avoid issues with the main page
-                download_page = browser_context.new_page()
-                # Set up the download handler before navigating
-                with download_page.expect_download(timeout=30000) as download_info:
-                    # Instead of direct navigation, use click on a new tab
-                    download_page.evaluate("(url) => window.location.href = url", download_url)
-                download = download_info.value
-                path = pdf_dir / filename
-                download.save_as(path)
-                print(f"Saved ({current_report}/{total_reports}):\t{filename}")
-                download_page.close()
-            # If something goes wrong, print error and continue
-            except Exception as e:
-                print(f"Error downloading {filename}: {e}")
-                
-            # Plus add failed download to my created list
+            # Look through ALL links in the entire item (not just detail_container)
+            all_links = item.locator("a").all()
+            for link in all_links:
+                href = link.get_attribute("href")
+                if href and href.lower().endswith(".pdf"):
+                    download_url = href
+                    
+                    # Try to get size from the link text
+                    link_text = link.inner_text()
+                    size_match = re.search(r'(\d+)\s*KB', link_text, re.IGNORECASE)
+                    if size_match:
+                        size_kb = int(size_match.group(1))
+                        remote_size_bytes = size_kb * 1024
+                        download_link_element = link  # save this exact link for download
+                        print(f"✓ Found size in link: {remote_size_bytes} bytes ({size_kb} KB)")
+                        break
+
+            # If we didn't find the size in the link, look in the entire item text
+            if download_url and not remote_size_bytes:
+                item_text = item.inner_text()
+                size_match = re.search(r'(\d+)\s*KB', item_text, re.IGNORECASE)
+                if size_match:
+                    size_kb = int(size_match.group(1))
+                    remote_size_bytes = size_kb * 1024
+                    print(f"✓ Found size in item text: {remote_size_bytes} bytes ({size_kb} KB)")
+
+            if not download_url:
+                print(f"No PDF download link for project {id}, skipping...")
                 failed_downloads.append({
+                    "project_number": id,
+                    "filename": filename,
+                    "slug": slug,
+                    "title": metadata.get("Titel", ""),
+                    "date": metadata.get("Erscheinungsdatum", ""),
+                    "url": metadata.get("url", ""),
+                    "download_url": None,
+                    "error": "No PDF download link found"
+                })
+                # Save immediately
+                with failed_file.open("w", encoding="utf-8") as f:
+                    json.dump(failed_downloads, f, indent=2, ensure_ascii=False)
+                continue
+
+            # I ran into the issue that the scraper would download summary reports and didnt download any other reports if the project number and language already existed
+            # But I need the comprehensive reports (100+ pages). So I want to replace the old report, with the more comprehensive report, if the file size is bigger, while keeping the language constant
+            # Check for existing files with same project number and language
+            existing_files = list(pdf_dir.glob(f"*_{id}_{lang}.pdf"))
+            should_download = True
+            existing_file = None
+
+            if existing_files:
+                existing_file = max(existing_files, key=lambda p: p.stat().st_size)
+                print(f"Found existing file for project {id} in {lang}: {existing_file.name} ({existing_file.stat().st_size} bytes)")
+                
+                # Compare with remote size if we have it
+                if remote_size_bytes:
+                    if remote_size_bytes <= existing_file.stat().st_size:
+                        print(f"✓ Existing file is same or bigger ({existing_file.stat().st_size} >= {remote_size_bytes}) → skip download")
+                        should_download = False
+                    else:
+                        print(f"📥 Remote file is bigger ({remote_size_bytes} > {existing_file.stat().st_size}) → will download and replace")
+                else:
+                    print(f"⚠️ Could not determine remote file size from link, will download to be safe")
+            else:
+                print(f"No existing file found for project {id} in {lang}, will download")
+
+            if should_download:
+                print(f"Downloading ({current_report}/{total_reports}):\t{filename}")
+                path = pdf_dir / filename
+
+                if not download_link_element:
+                    print(f"❌ Could not find PDF link for download, skipping")
+                    continue
+
+                try:
+                    # Capture the actual PDF response when clicking the download link
+                    with page.expect_download(timeout=60000) as download_info:
+                        download_link_element.click()
+
+                    download = download_info.value
+                    download.save_as(path)
+                    print(f"✅ Downloaded via Playwright: {filename}")
+
+                except TimeoutError:
+                    print(f"❌ Timeout while trying to download {filename}")
+                    failed_downloads.append({
                         "project_number": id,
                         "filename": filename,
                         "slug": slug,
@@ -198,33 +247,55 @@ def main():
                         "date": metadata.get("Erscheinungsdatum", ""),
                         "url": metadata.get("url", ""),
                         "download_url": download_url,
-                        "error": str(e)
+                        "error": "Playwright download timeout"
                     })
-            continue
-            random_delay(6, 10)
+                    with failed_file.open("w", encoding="utf-8") as f:
+                        json.dump(failed_downloads, f, indent=2, ensure_ascii=False)
+                    continue
 
+                # Remove old file if replaced
+                if existing_file and existing_file.exists() and existing_file.name != path.name:
+                    existing_file.unlink()
+                    results = [r for r in results if r.get("filename") != existing_file.name]
+
+                # Save metadata
+                if not any(r.get("filename") == filename for r in results):
+                    results.append(metadata)
+
+                with results_file.open("w", encoding="utf-8") as f:
+                    json.dump(results, f, indent=2, ensure_ascii=False)
+
+            else:
+                print(f"⏭️ Skipped ({current_report}/{total_reports}):\t{filename}")
+            
         browser_context.close()
+
+        # Temporary Chromium profile is removed after each run.
+        try:
+            shutil.rmtree(tmp_dir)
+        except Exception as e:
+            print(f"Warning: temp dir cleanup failed: {e}")
+
         print("Browser closed.")
 
 # (6) Since not all reports were downloadbale, I want an overview of the failed downloads for colleagues to cross check
 # Export failed downloads to CSV
-    if failed_downloads:
+        if failed_downloads:
             print(f"\n{'='*60}")
             print(f"FAILED DOWNLOADS SUMMARY")
             print(f"{'='*60}")
             print(f"Total failed downloads: {len(failed_downloads)}")
             print(f"Percentage: {len(failed_downloads) / total_reports * 100:.2f}%")
             
-            # Convert list to df
+            # Already saved as JSON throughout, just confirm
+            print(f"Failed downloads saved to: failed_downloads.json")
+            
+            # OPTIONAL: Also export to CSV for easy viewing in Excel
             df_failed = pd.DataFrame(failed_downloads)
-
-            # Export to csv
-            df_failed.to_csv("pdfs\failed_downloads.csv", index=False, encoding="utf-8")
-
-            print(f"Failed downloads exported to: {"pdfs\failed_downloads.csv"}")
-    else:
+            df_failed.to_csv("pdfs/failed_downloads.csv", index=False, encoding="utf-8")
+            print(f"Also exported to CSV: pdfs/failed_downloads.csv")
+        else:
             print("\n✓ All downloads successful! No failed downloads to report.")
-
 
 if __name__ == "__main__":
     main()

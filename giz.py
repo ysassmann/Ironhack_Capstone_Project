@@ -17,6 +17,7 @@ import time
 import random
 import shutil
 from pathlib import Path
+from datetime import datetime, timedelta
 
 
 from playwright.sync_api import sync_playwright # for browser automation
@@ -26,6 +27,7 @@ from rich import print
 
 # (2) This function fixes the date format to be consistent because the website has dates in different formats which is annoying
 def normalize_date(date: str) -> str:
+    """Standardize date formats from details of reports to YYYY-MM"""
     if m := re.match(r'^(\d{2})\.(\d{4})$', date):  # MM.YYYY
         return f"{m.group(2)}-{m.group(1)}"
     if m := re.match(r'^(\d{4})\.(\d{2})$', date):  # YYYY.MM
@@ -47,14 +49,51 @@ pdf_dir = Path("pdfs") / "giz" # Path("pdfs") creates a Path object for the pdfs
 pdf_dir.mkdir(parents=True, exist_ok=True) # make the folders if they don't exist
 
 
-# (5) Start playwright; this is what controls the browser
-def main():
+## I ran into issues with the website after 1 hour or roughly 400 scripts, so I had to devide the sessions into smaller chunks.
+# (5) Progress tracking
+def save_progress(report_index):
+    """Save the current progress"""
+    progress_file = Path("download_progress.json")
+    with progress_file.open("w", encoding="utf-8") as f:
+        json.dump({"last_completed_index": report_index, "timestamp": datetime.now().isoformat()}, f)
+
+def load_progress():
+    """Load the last progress"""
+    progress_file = Path("download_progress.json")
+    if progress_file.exists():
+        with progress_file.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            print(f"📍 Resuming from report {data['last_completed_index'] + 1}")
+            return data['last_completed_index']
+    return -1  # Start from beginning
+
+def should_restart_session(downloads_in_session, session_start_time, max_downloads=350, max_minutes=45):
+    """Check if we should restart the browser session"""
+    elapsed = datetime.now() - session_start_time
+    if downloads_in_session >= max_downloads:
+        print(f"⚠️ Reached {downloads_in_session} downloads - restarting session")
+        return True
+    if elapsed > timedelta(minutes=max_minutes):
+        print(f"⚠️ Session running for {elapsed.seconds // 60} minutes - restarting session")
+        return True
+    return False
+
+
+# (6) Start playwright; this is what controls the browser
+def scrape_with_session(start_index=0):
+    """Run scraping session starting from given index"""
     
     # Some of the reports didnt download and I cant figure out why. So I wanted an overview of the failed downloads
     failed_file = Path("failed_downloads.json")
     failed_downloads = json.load(failed_file.open("r", encoding="utf-8")) if failed_file.exists() else []
     results_file = Path("results_giz.json")
     results = json.load(results_file.open("r", encoding="utf-8")) if results_file.exists() else []
+
+    # Session tracking
+    downloads_in_session = 0
+    session_start_time = datetime.now()
+    consecutive_timeouts = 0
+    MAX_CONSECUTIVE_TIMEOUTS = 5
 
     with sync_playwright() as p:
         # Create temporary directory for browser profile
@@ -116,18 +155,46 @@ def main():
         # Add a counter to the downloads to gain a better overview of the progress
         total_reports = len(all_items)
         print(f"Found {total_reports} total reports")
-        
-        # Counter to track progress
-        current_report = 0
 
-        # Loop through each result item
-        for item in reversed(all_items):
-            current_report += 1  # increment counter for each report
+        # Save total count to file for later reference
+        total_file = Path("total_reports.json")
+        with total_file.open("w", encoding="utf-8") as f:
+            json.dump({"total_reports": total_reports}, f) 
+
+        # Process items, starting from start_index
+        for idx, item in enumerate(reversed(all_items)):
+            # Skip items before start_index
+            if idx <= start_index:
+                continue
+
+            current_report = idx + 1
             print(f"\n--- Processing report {current_report} of {total_reports} ---")
             
-            # Some reports didnt have links, so I needed to skip them
+            # Check if we should restart session
+            if should_restart_session(downloads_in_session, session_start_time):
+                print("💫 Restarting browser session...")
+                save_progress(idx - 1)  # Save before restarting
+                browser_context.close()
+                try:
+                    shutil.rmtree(tmp_dir)
+                except Exception as e:
+                    print(f"Warning: temp dir cleanup failed: {e}")
+                return idx - 1  # Return index to resume from
+
+            # Check for consecutive timeouts
+            if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+                print(f"❌ {MAX_CONSECUTIVE_TIMEOUTS} consecutive timeouts - saving progress and restarting session")
+                save_progress(idx - consecutive_timeouts - 1)  # Save last successful
+                browser_context.close()
+                try:
+                    shutil.rmtree(tmp_dir)
+                except Exception as e:
+                    print(f"Warning: temp dir cleanup failed: {e}")
+                return idx - consecutive_timeouts - 1
+
             if item.locator(".shortsummary-url a").count() == 0:
                 continue
+            
             slug_element = item.locator(".shortsummary-url a").first
             slug = slug_element.get_attribute("alt").split(" ")[0]
             
@@ -237,8 +304,15 @@ def main():
                     download.save_as(path)
                     print(f"✅ Downloaded via Playwright: {filename}")
 
+                    # Success - reset timeout counter and increment download counter
+                    consecutive_timeouts = 0
+                    downloads_in_session += 1
+
                 except TimeoutError:
                     print(f"❌ Timeout while trying to download {filename}")
+                    consecutive_timeouts += 1
+                    print(f"⚠️ Consecutive timeouts: {consecutive_timeouts}/{MAX_CONSECUTIVE_TIMEOUTS}")
+
                     failed_downloads.append({
                         "project_number": id,
                         "filename": filename,
@@ -265,8 +339,12 @@ def main():
                 with results_file.open("w", encoding="utf-8") as f:
                     json.dump(results, f, indent=2, ensure_ascii=False)
 
+                # Save progress periodically
+                if downloads_in_session % 10 == 0:
+                    save_progress(idx)
+
             else:
-                print(f"⏭️ Skipped ({current_report}/{total_reports}):\t{filename}")
+                print(f"⏭️ Processed ({current_report}/{total_reports}):\t{filename}")
             
         browser_context.close()
 
@@ -277,15 +355,49 @@ def main():
             print(f"Warning: temp dir cleanup failed: {e}")
 
         print("Browser closed.")
+        return total_reports - 1
 
-# (6) Since not all reports were downloadbale, I want an overview of the failed downloads for colleagues to cross check
+# (8) Restart where left off
+def main():
+    """Main function with automatic resume and restart"""
+    print("="*60)
+    print("GIZ PDF Scraper with Auto-Restart")
+    print("="*60)
+    
+    start_index = load_progress()
+    
+    while True:
+        last_index = scrape_with_session(start_index)
+        
+        # Check if we're done
+        if last_index >= 1344:  # Adjust based on total reports
+            print("\n" + "="*60)
+            print("✅ ALL REPORTS PROCESSED!")
+            print("="*60)
+            break
+        
+        # Resume from where we left off
+        start_index = last_index
+        print(f"\n🔄 Resuming from report {start_index + 1}...")
+        time.sleep(5)  # Brief pause before restarting
+
+# (9) Since not all reports were downloadable, I want an overview of the failed downloads for colleagues to cross check
 # Export failed downloads to CSV
+    failed_file = Path("failed_downloads.json")
+    total_file = Path("total_reports.json")
+    
+    if failed_file.exists():
+        failed_downloads = json.load(failed_file.open("r", encoding="utf-8"))
         if failed_downloads:
             print(f"\n{'='*60}")
             print(f"FAILED DOWNLOADS SUMMARY")
             print(f"{'='*60}")
             print(f"Total failed downloads: {len(failed_downloads)}")
-            print(f"Percentage: {len(failed_downloads) / total_reports * 100:.2f}%")
+            
+            # Load total from saved file
+            if total_file.exists():
+                total_reports = json.load(total_file.open("r", encoding="utf-8"))["total_reports"]
+                print(f"Percentage: {len(failed_downloads) / total_reports * 100:.2f}%")
             
             # Already saved as JSON throughout, just confirm
             print(f"Failed downloads saved to: failed_downloads.json")

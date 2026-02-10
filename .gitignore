@@ -9,7 +9,7 @@ giz/
 *.pdf
 
 # Chroma_db vector data
-chroma_db_giz/ 
+chroma_db/ 
 
 # Python cache
 __pycache__/

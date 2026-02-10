@@ -113,7 +113,7 @@ def scrape_with_session(start_index=0):
 
         # Launch persistent context with the configured user data directory
         browser_context = p.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir, headless=False, accept_downloads=True
+            user_data_dir=user_data_dir, headless=True, accept_downloads=True
         )            # headless=True means no browser window shows up
                      # accept_downloads=True allows downloading files
 
@@ -162,7 +162,7 @@ def scrape_with_session(start_index=0):
             json.dump({"total_reports": total_reports}, f) 
 
         # Process items, starting from start_index
-        for idx, item in enumerate(reversed(all_items)):
+        for idx, item in enumerate(all_items):
             # Skip items before start_index
             if idx <= start_index:
                 continue
@@ -401,13 +401,10 @@ def main():
             
             # Already saved as JSON throughout, just confirm
             print(f"Failed downloads saved to: failed_downloads.json")
-            
-            # OPTIONAL: Also export to CSV for easy viewing in Excel
-            df_failed = pd.DataFrame(failed_downloads)
-            df_failed.to_csv("pdfs/failed_downloads.csv", index=False, encoding="utf-8")
-            print(f"Also exported to CSV: pdfs/failed_downloads.csv")
-        else:
-            print("\n✓ All downloads successful! No failed downloads to report.")
 
 if __name__ == "__main__":
     main()
+
+
+
+

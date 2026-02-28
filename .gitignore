@@ -34,3 +34,6 @@ Thumbs.db
 
 # Results json
 results_giz.json
+
+# Chunk cache
+chunks_cache.pkl

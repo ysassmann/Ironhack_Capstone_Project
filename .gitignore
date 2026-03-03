@@ -32,8 +32,9 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Results json
+# Json
 results_giz.json
+research_history.json
 
 # Chunk cache
 chunks_cache.pkl

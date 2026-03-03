@@ -16,9 +16,21 @@ from langchain_core.tools import Tool
 from dotenv import load_dotenv
 import time
 from tqdm import tqdm
+from pathlib import Path
+import streamlit as st
 
 
 load_dotenv()
+
+def get_secret(key: str) -> str:
+    """Fetch from Streamlit secrets (cloud) or environment variables (local)."""
+    try:
+        return st.secrets[key]
+    except (FileNotFoundError, KeyError):
+        value = os.getenv(key)
+        if value is None:
+            raise ValueError(f"Secret '{key}' not found in st.secrets or environment variables.")
+        return value
 
 
 class DeepResearchAgent:
@@ -166,11 +178,13 @@ class DeepResearchAgent:
             persist_directory: Where to store the vector database
         """
         
+        api_key = get_secret("OPENAI_AZURE_API_KEY")
+        
         # Using GPT-5
-        self.llm = ChatOpenAI(model="gpt-5",
+        self.llm = ChatOpenAI(model="gpt-5.1",
                               base_url="https://bootcampai.openai.azure.com/openai/v1/",
                               temperature = 0,
-                              api_key=os.environ["OPENAI_AZURE_API_KEY"])
+                              api_key=api_key)
         
         
         # Create/load vector store
@@ -181,7 +195,7 @@ class DeepResearchAgent:
             embeddings = OpenAIEmbeddings(
                 model="text-embedding-3-large",
                 base_url="https://bootcampai.openai.azure.com/openai/v1/",
-                api_key=os.environ["OPENAI_AZURE_API_KEY"]
+                api_key=api_key
             )
             # Load existing vector store directly
             self.vectorstore = Chroma(

@@ -38,3 +38,6 @@ research_history.json
 
 # Chunk cache
 chunks_cache.pkl
+
+# Scripts
+1_migrate_to_azure.py

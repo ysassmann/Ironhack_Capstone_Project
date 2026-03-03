@@ -15,9 +15,10 @@ st.set_page_config(
 
 HISTORY_FILE       = "./research_history.json"
 CONTEXT_CHAR_LIMIT = 3000
+CHROMA_PATH        = "./chroma_db"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CSS — aggressive overrides to beat Streamlit defaults
+# CSS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
@@ -51,7 +52,11 @@ html, body, [class*="css"], .stApp {
     color: var(--text) !important;
 }
 
+#MainMenu { visibility: visible; }
+footer    { visibility: hidden; }
+header    { visibility: visible; }
 [data-testid="collapsedControl"] { visibility: visible !important; }
+
 .block-container { padding-top: 2rem !important; padding-bottom: 4rem !important; max-width: 860px !important; }
 
 /* ── Force white text in main ── */
@@ -75,15 +80,9 @@ html, body, [class*="css"], .stApp {
 [data-testid="stSidebar"] { background-color: var(--surface) !important; border-right: 1px solid var(--border) !important; }
 [data-testid="stSidebar"] > div { padding: 1.2rem 0.9rem !important; }
 [data-testid="stSidebar"] * { color: var(--text) !important; }
-[data-testid="stSidebar"] input {
-    background: var(--surface2) !important; color: var(--text) !important;
-    border: 1px solid var(--border2) !important; border-radius: var(--rs) !important;
-    font-family: 'JetBrains Mono', monospace !important; font-size: .8rem !important;
-    padding: .4rem .65rem !important;
-}
 [data-testid="stSidebar"] hr { border-color: var(--border) !important; margin: .6rem 0 !important; }
 
-/* ── Sidebar buttons: FORCE small mono single-line ── */
+/* ── Sidebar buttons ── */
 section[data-testid="stSidebar"] button,
 section[data-testid="stSidebar"] .stButton button,
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
@@ -114,7 +113,6 @@ section[data-testid="stSidebar"] .stButton button:hover {
     border-color: var(--accent) !important;
     color: var(--text) !important;
 }
-/* Override paragraph inside button */
 section[data-testid="stSidebar"] button p,
 section[data-testid="stSidebar"] .stButton button p {
     font-size: 0.65rem !important;
@@ -258,11 +256,11 @@ def generate_pdf(session: dict) -> bytes:
     doc = SimpleDocTemplate(buf, pagesize=A4,
         leftMargin=1.8*cm, rightMargin=1.8*cm, topMargin=1.8*cm, bottomMargin=1.5*cm)
 
-    ink     = colors.HexColor("#1a1a2e")
-    accent  = colors.HexColor("#4f8ef7")
-    muted   = colors.HexColor("#5a6a8a")
-    mid     = colors.HexColor("#3a4a6a")
-    amber   = colors.HexColor("#b45309")
+    ink    = colors.HexColor("#1a1a2e")
+    accent = colors.HexColor("#4f8ef7")
+    muted  = colors.HexColor("#5a6a8a")
+    mid    = colors.HexColor("#3a4a6a")
+    amber  = colors.HexColor("#b45309")
 
     s_doctitle = ParagraphStyle("dt", fontName="Helvetica-Bold", fontSize=20, textColor=colors.HexColor("#0e1117"), spaceAfter=4, leading=24)
     s_docsub   = ParagraphStyle("ds", fontName="Helvetica",      fontSize=8,  textColor=muted, spaceAfter=14, leading=12)
@@ -325,7 +323,9 @@ def generate_pdf(session: dict) -> bytes:
     return buf.getvalue()
 
 
-# ── Persistent history ─────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
 def load_history_from_disk() -> list:
     if not os.path.exists(HISTORY_FILE): return []
     try:
@@ -342,10 +342,6 @@ def session_title(session: dict) -> str:
         q = session["turns"][0]["question"].replace("\n", " ").strip()
         return (q[:32] + "…") if len(q) > 32 else q
     return "—"
-
-# ── State ──────────────────────────────────────────────────────────────────────
-for key, val in [("sessions", load_history_from_disk()), ("active_session_id", None), ("agent", None), ("agent_ready", False)]:
-    if key not in st.session_state: st.session_state[key] = val
 
 def load_agent(path):
     try:
@@ -392,21 +388,41 @@ def append_turn(session_id, turn):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SESSION STATE INIT
+# ══════════════════════════════════════════════════════════════════════════════
+for key, val in [("sessions", load_history_from_disk()), ("active_session_id", None), ("agent", None), ("agent_ready", False)]:
+    if key not in st.session_state: st.session_state[key] = val
+
+# ── Auto-connect to ChromaDB on first load ────────────────────────────────────
+if not st.session_state.agent_ready:
+    with st.spinner("Connecting to database…"):
+        agent, err = load_agent(CHROMA_PATH)
+        if agent:
+            st.session_state.agent = agent
+            st.session_state.agent_ready = True
+        else:
+            st.error(f"Could not connect to ChromaDB at `{CHROMA_PATH}`: {err}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown('<div class="sb-title">EvidenceAI</div><div class="sb-sub">GIZ Project Database · v0.1</div>', unsafe_allow_html=True)
 
-    chroma_path = st.text_input("db", value="./chroma_db", label_visibility="collapsed", placeholder="./chroma_db")
-    if st.button("⚡ Connect", use_container_width=True):
-        with st.spinner("Connecting…"):
-            agent, err = load_agent(chroma_path)
-            if agent: st.session_state.agent = agent; st.session_state.agent_ready = True; st.success("Connected")
-            else: st.error(str(err))
-
     c = "#34d399" if st.session_state.agent_ready else "#f87171"
     t = "● CONNECTED" if st.session_state.agent_ready else "○ NOT CONNECTED"
-    st.markdown(f"<div style='font-size:.68rem;color:{c};font-weight:600;margin-top:.2rem;font-family:JetBrains Mono,monospace;'>{t}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='font-size:.68rem;color:{c};font-weight:600;margin-bottom:.6rem;font-family:JetBrains Mono,monospace;'>{t}</div>", unsafe_allow_html=True)
+
+    if not st.session_state.agent_ready:
+        if st.button("↺ Retry Connection", use_container_width=True):
+            agent, err = load_agent(CHROMA_PATH)
+            if agent:
+                st.session_state.agent = agent
+                st.session_state.agent_ready = True
+                st.rerun()
+            else:
+                st.error(str(err))
 
     st.markdown("---")
     if st.button("＋ New Session", use_container_width=True):
@@ -432,7 +448,7 @@ with st.sidebar:
             st.session_state.sessions = []; st.session_state.active_session_id = None
             save_history_to_disk([]); st.rerun()
 
-    st.markdown('<div class="sb-meta">History → research_history.json<br>Max calls: 4 · Iterations: 8<br>Model: GPT-5</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sb-meta">History → research_history.json<br>Max calls: 4 · Iterations: 8<br>Model: GPT-5.1</div>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -448,7 +464,7 @@ st.markdown("""
 
 active_session = get_active_session()
 
-# ── VIEW A ─────────────────────────────────────────────────────────────────────
+# ── VIEW A — No active session ─────────────────────────────────────────────────
 if active_session is None:
     st.markdown("""
         <div class="empty-state">
@@ -459,7 +475,7 @@ if active_session is None:
     """, unsafe_allow_html=True)
 
     if not st.session_state.agent_ready:
-        st.markdown('<div class="info-box">⚡ Connect to the vector database in the sidebar to begin.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-box">⚡ Database connection failed — check the error above or use the Retry button in the sidebar.</div>', unsafe_allow_html=True)
     else:
         query = st.text_area("q", height=130,
             placeholder="e.g. What institutional factors determined sustainability of water projects in East Africa after project closure?",
@@ -480,7 +496,7 @@ if active_session is None:
                 except Exception as e:
                     st.error(f"Agent error: {e}")
 
-# ── VIEW B ─────────────────────────────────────────────────────────────────────
+# ── VIEW B — Active session ────────────────────────────────────────────────────
 else:
     turns = active_session.get("turns", [])
 
@@ -564,7 +580,7 @@ else:
                 except Exception as e:
                     st.error(f"Agent error: {e}")
     else:
-        st.markdown('<div class="info-box" style="margin-top:1.5rem;">⚡ Connect to the vector database to ask follow-up questions.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-box" style="margin-top:1.5rem;">⚡ Database not connected — use the Retry button in the sidebar.</div>', unsafe_allow_html=True)
 
     # ── Full session export ────────────────────────────────────────────────────
     if turns:

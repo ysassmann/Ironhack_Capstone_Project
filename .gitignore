@@ -35,6 +35,7 @@ Thumbs.db
 # Json
 results_giz.json
 research_history.json
+total_reports.json
 
 # Chunk cache
 chunks_cache.pkl

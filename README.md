@@ -71,7 +71,7 @@ Reports include three formats: summary reports, "At-a-Glance" briefs, and compre
 
 ## Components
 
-### 1. Web Scraper (`scraper.py`)
+### 1. Web Scraper (`giz.py`)
 A Playwright-based browser automation script that navigates the GIZ publications portal, filters for project evaluations, and downloads all matching PDFs with metadata. Key features:
 - Human-mimicking random delays
 - Session restart logic (avoids bot detection after ~350 downloads)
@@ -79,7 +79,7 @@ A Playwright-based browser automation script that navigates the GIZ publications
 - Prefers comprehensive reports over summaries (compares file sizes before downloading)
 - Exports failed downloads to `failed_downloads.json` for manual follow-up
 
-### 2. Vector Store (`vectorstore.py`)
+### 2. Vector Store (`vectorization.ipynb`)
 Processes downloaded PDFs into a searchable ChromaDB vector store:
 - Splits documents into overlapping chunks (1,500 tokens, 300 overlap)
 - Enriches each chunk with catalog metadata (title, keywords, classification, date, author) baked into the embedding
